@@ -1,0 +1,34 @@
+# Directories with model checkpoints and datasets
+chkp/
+data/
+logs/
+*.log
+
+# Model files
+*.pt
+*.pth
+*.h5
+*.pkl
+*.pickle
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Other
+.claude/
