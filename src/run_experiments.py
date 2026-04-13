@@ -30,16 +30,16 @@ from datetime import datetime
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
-# Dataset paths
-EKUSH_ROOT = PROJECT_ROOT / "data" / "Ekush" / "dataset" / "dataset"
-CASIA_ROOT = PROJECT_ROOT / "data" / "CASIA"
+# Dataset paths (absolute paths on this machine)
+EKUSH_ROOT = Path("C:/Ekush/dataset/dataset")
+CASIA_ROOT = Path("C:/CASIA")
 
 # Checkpoint directories for SSL pretraining
 SSL_CKPT_DIR = PROJECT_ROOT / "chkp" / "ssl_pretrain"
 SUPERVISED_CKPT_DIR = PROJECT_ROOT / "chkp" / "supervised_pretrain"
 EXPERIMENT_DIR = PROJECT_ROOT / "chkp" / "experiments"
 
-LABEL_FRACTIONS = [0.01, 0.05, 0.10, 0.25, 0.50, 1.0]
+LABEL_FRACTIONS = [0.01, 0.10, 1.0]
 
 
 def run_cmd(cmd, description=""):
@@ -161,6 +161,7 @@ def phase_finetune(args):
                 "--backbone_init", exp["backbone_init"],
                 "--label_fraction", str(frac),
                 "--experiment_name", exp_name,
+                "--checkpoint_dir", str(exp_dir),
                 "--batch_size", "128",
                 "--eval_batch_size", "128",
             ]

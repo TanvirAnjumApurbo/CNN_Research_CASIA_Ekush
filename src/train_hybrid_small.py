@@ -263,8 +263,8 @@ def build_data_loaders(root, input_size, batch_size, num_workers, class_to_idx,
 
     import platform
     is_windows = platform.system() == "Windows"
-    # Use 4 workers on Windows (persistent_workers safe with controlled count)
-    effective_workers = min(num_workers, 4) if is_windows else num_workers
+    # On Windows: cap at 2 workers, persistent_workers=False to avoid page file exhaustion
+    effective_workers = min(num_workers, 2) if is_windows else num_workers
 
     train_loader_kwargs = {
         "batch_size": batch_size,
@@ -273,7 +273,7 @@ def build_data_loaders(root, input_size, batch_size, num_workers, class_to_idx,
         "shuffle": True,
     }
     if effective_workers > 0:
-        train_loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 3})
+        train_loader_kwargs.update({"persistent_workers": False, "prefetch_factor": 2})
 
     eval_loader_kwargs = {
         "batch_size": eval_batch_size,
@@ -281,8 +281,6 @@ def build_data_loaders(root, input_size, batch_size, num_workers, class_to_idx,
         "pin_memory": torch.cuda.is_available(),
         "shuffle": False,
     }
-    if eval_loader_kwargs["num_workers"] > 0:
-        eval_loader_kwargs["persistent_workers"] = True
 
     train_loader = DataLoader(train_ds, **train_loader_kwargs)
     val_loader = DataLoader(val_ds, **eval_loader_kwargs)

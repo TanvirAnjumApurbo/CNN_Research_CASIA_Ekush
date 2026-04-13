@@ -123,15 +123,17 @@ def train(args=None):
 
     import platform
     is_windows = platform.system() == "Windows"
-    eff_workers = min(args.num_workers, 4) if is_windows else args.num_workers
+    # On Windows: cap at 2 workers. persistent_workers=False means workers are
+    # killed at end of each epoch, so RAM spike is temporary and safe at 85% baseline.
+    eff_workers = min(2, args.num_workers) if is_windows else args.num_workers
 
     train_kwargs = {"batch_size": args.batch_size, "shuffle": True,
                     "num_workers": eff_workers, "pin_memory": True}
     if eff_workers > 0:
-        train_kwargs.update({"persistent_workers": True, "prefetch_factor": 3})
+        train_kwargs.update({"persistent_workers": False, "prefetch_factor": 2})
     train_loader = DataLoader(train_ds, **train_kwargs)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            num_workers=min(eff_workers, 2), pin_memory=True)
+                            num_workers=0, pin_memory=True)
 
     # Model
     model = SupervisedPretrainModel(num_classes).to(device, memory_format=torch.channels_last)

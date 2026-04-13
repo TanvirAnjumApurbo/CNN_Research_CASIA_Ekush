@@ -501,3 +501,10 @@ All figures are generated with:
 | `src/visualize_embeddings.py` | t-SNE embedding visualization for trained models |
 | `src/plot_results.py` | Cross-experiment comparison plots (label efficiency, bar charts, etc.) |
 | `src/run_experiments.py` | Automated orchestration for the full 30-experiment matrix |
+
+
+
+
+
+
+
