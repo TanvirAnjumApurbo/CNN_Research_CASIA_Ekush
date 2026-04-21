@@ -149,11 +149,18 @@ def phase_finetune(args):
             exp_name = f"{exp['name']}_frac{frac:.2f}"
             exp_dir = EXPERIMENT_DIR / exp_name
 
-            # Skip if already completed
-            best_ckpt = exp_dir / "best_checkpoint.pth"
-            if best_ckpt.exists() and not args.force:
-                print(f"[SKIP] {exp_name} already completed")
-                continue
+            # Skip only if training fully completed (check epoch in checkpoint)
+            resume_ckpt = exp_dir / "resume_checkpoint.pth"
+            if resume_ckpt.exists() and not args.force:
+                import torch
+                ckpt = torch.load(resume_ckpt, map_location="cpu", weights_only=False)
+                ckpt_epoch = ckpt.get("epoch", -1)
+                total_epochs = 100  # STAGE_A (6) + STAGE_B (94)
+                if ckpt_epoch >= total_epochs - 1:
+                    print(f"[SKIP] {exp_name} already completed (epoch {ckpt_epoch+1}/{total_epochs})")
+                    continue
+                else:
+                    print(f"[RESUME] {exp_name} from epoch {ckpt_epoch+1}/{total_epochs}")
 
             cmd = [
                 sys.executable, str(SRC_DIR / "train_hybrid_small.py"),
