@@ -1,4 +1,5 @@
 import os
+import math
 import argparse
 from pathlib import Path
 import json
@@ -31,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # training stages
 STAGE_A_EPOCHS = 6  # head + transformer
-STAGE_B_EPOCHS = 194  # full fine-tune
+STAGE_B_EPOCHS = 94  # full fine-tune
 
 # LR groups
 BACKBONE_LR = 1e-5
@@ -80,7 +81,7 @@ def parse_args():
 
     parser.add_argument("--stage_a_epochs", type=int, default=STAGE_A_EPOCHS)
     parser.add_argument("--stage_b_epochs", type=int, default=STAGE_B_EPOCHS)
-    parser.add_argument("--prefer_best_resume", action="store_true", default=True)
+    parser.add_argument("--prefer_best_resume", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -289,7 +290,7 @@ def build_data_loaders(root, input_size, batch_size, num_workers, class_to_idx,
     return train_loader, val_loader, test_loader
 
 
-def build_optimizer(model, stage: str):
+def build_optimizer(model, stage: str, backbone_init: str = "random"):
     """Build optimizer for a given training stage."""
     if stage == "A":
         return optim.AdamW(
@@ -302,9 +303,11 @@ def build_optimizer(model, stage: str):
         )
 
     if stage == "B":
+        # Random backbone needs higher LR (no pretrained features to preserve)
+        bb_lr = TRANSFORMER_LR if backbone_init == "random" else BACKBONE_LR
         return optim.AdamW(
             [
-                {"params": model.backbone.parameters(), "lr": BACKBONE_LR},
+                {"params": model.backbone.parameters(), "lr": bb_lr},
                 {"params": model.head.parameters(), "lr": TRANSFORMER_LR},
                 {"params": model.embedding_fc.parameters(), "lr": HEAD_LR},
                 {"params": model.arcface.parameters(), "lr": HEAD_LR},
@@ -340,6 +343,13 @@ def train(args=None):
         args = parse_args()
 
     set_seed(args.seed)
+
+    # Random backbone: skip Stage A (freezing random features is counterproductive)
+    # and give all epochs to Stage B where everything trains together
+    if args.backbone_init == "random":
+        total = args.stage_a_epochs + args.stage_b_epochs
+        args.stage_a_epochs = 0
+        args.stage_b_epochs = total
 
     DATA_ROOT = Path(args.data_root)
     INPUT_SIZE = args.input_size
@@ -459,7 +469,7 @@ def train(args=None):
 
     # Stage A setup (backbone frozen)
     set_backbone_trainable(model, trainable=False)
-    optimizer = build_optimizer(model, stage="A")
+    optimizer = build_optimizer(model, stage="A", backbone_init=args.backbone_init)
     scheduler = None
 
     if resume is not None and start_stage == "A" and not skip_stage_a:
@@ -484,15 +494,24 @@ def train(args=None):
                 with autocast(device_type=device.type, enabled=amp_enabled):
                     logits = model(imgs, labels)
                     loss = criterion(logits, labels)
+
+                loss_val = loss.item()
+                if not math.isfinite(loss_val):
+                    print(f"[WARN] Non-finite loss ({loss_val}) detected, skipping batch")
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
+
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
 
-                total_loss += loss.item() * imgs.size(0)
+                total_loss += loss_val * imgs.size(0)
                 _, preds = logits.max(1)
                 total_correct += (preds == labels).sum().item()
                 total_samples += imgs.size(0)
-                pbar.set_postfix(loss=loss.item(), acc=total_correct / total_samples)
+                pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples)
 
             train_acc = total_correct / total_samples if total_samples > 0 else 0
             train_loss = total_loss / total_samples if total_samples > 0 else 0
@@ -536,7 +555,7 @@ def train(args=None):
     print("[INFO] Data loaders rebuilt for Stage B")
 
     set_backbone_trainable(model, trainable=True)
-    optimizer = build_optimizer(model, stage="B")
+    optimizer = build_optimizer(model, stage="B", backbone_init=args.backbone_init)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.stage_b_epochs
     )
@@ -572,15 +591,24 @@ def train(args=None):
             with autocast(device_type=device.type, enabled=amp_enabled):
                 logits = model(imgs, labels)
                 loss = criterion(logits, labels)
+
+            loss_val = loss.item()
+            if not math.isfinite(loss_val):
+                print(f"[WARN] Non-finite loss ({loss_val}) detected, skipping batch")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
-            total_loss += loss.item() * imgs.size(0)
+            total_loss += loss_val * imgs.size(0)
             _, preds = logits.max(1)
             total_correct += (preds == labels).sum().item()
             total_samples += imgs.size(0)
-            pbar.set_postfix(loss=loss.item(), acc=total_correct / total_samples)
+            pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples)
 
         scheduler.step()
 

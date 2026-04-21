@@ -131,26 +131,27 @@ class ArcMarginProduct(nn.Module):
         - Training (label-conditioned): pass `labels` to apply angular margin.
         - Inference/validation (label-free): omit `labels` to get cosine logits.
         """
-        # input: (B, in_features)
-        cosine = F.linear(F.normalize(input), F.normalize(self.weight))
+        # Force fp32: ArcFace cos/sin/sqrt are numerically unstable in fp16
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            input = input.float()
+            cosine = F.linear(F.normalize(input), F.normalize(self.weight.float()))
 
-        # Label-free logits for evaluation/inference (strict protocol).
-        if labels is None:
-            return cosine * self.s
+            if labels is None:
+                return cosine * self.s
 
-        sine = torch.sqrt((1.0 - torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7) ** 2))
-        phi = cosine * self.cos_m - sine * self.sin_m
-        if self.easy_margin:
-            phi = torch.where(cosine > 0, phi, cosine)
-        else:
-            phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+            sine = torch.sqrt(torch.clamp(1.0 - torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7) ** 2, min=1e-6))
+            phi = cosine * self.cos_m - sine * self.sin_m
+            if self.easy_margin:
+                phi = torch.where(cosine > 0, phi, cosine)
+            else:
+                phi = torch.where(cosine > self.th, phi, cosine - self.mm)
 
-        one_hot = torch.zeros_like(cosine)
-        one_hot.scatter_(1, labels.view(-1, 1), 1.0)
+            one_hot = torch.zeros_like(cosine)
+            one_hot.scatter_(1, labels.view(-1, 1), 1.0)
 
-        logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
-        logits *= self.s
-        return logits
+            logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+            logits *= self.s
+            return logits
 
 
 class HybridModel(nn.Module):
@@ -182,7 +183,11 @@ class HybridModel(nn.Module):
     def forward(self, x, labels=None):
         featmap = self.backbone(x)
         emb = self.head(featmap)
-        emb = self.embedding_fc(emb)
+        # Linear in current precision, BatchNorm in fp32 to prevent
+        # running_mean/running_var drift that causes NaN after ~8 epochs under AMP
+        emb = self.embedding_fc[0](emb)
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            emb = self.embedding_fc[1](emb.float())
         if labels is None:
             return emb
         logits = self.arcface(emb, labels)
