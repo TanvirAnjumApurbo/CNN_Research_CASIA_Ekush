@@ -199,9 +199,7 @@ def run_inference(model, loader, device):
         imgs = imgs.to(device)
         labels = labels.to(device)
 
-        # Strict-protocol eval: label-free inference
-        emb = model(imgs, labels=None)
-        logits = model.arcface(emb, labels=None)
+        logits = model(imgs)
         probs = F.softmax(logits, dim=1)
         preds = logits.argmax(1)
 
@@ -551,8 +549,7 @@ def make_prediction_collage(
                 tensor = tensor.repeat(3, 1, 1)
             tensor = tensor.unsqueeze(0).to(device)
 
-            emb = model(tensor, labels=None)
-            logits = model.arcface(emb, labels=None)
+            logits = model(tensor)
             probs = F.softmax(logits, dim=1)
             pred = int(probs.argmax(1).item())
             prob = float(probs.max().item())

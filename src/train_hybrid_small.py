@@ -297,7 +297,7 @@ def build_optimizer(model, stage: str, backbone_init: str = "random"):
             [
                 {"params": model.head.parameters(), "lr": TRANSFORMER_LR},
                 {"params": model.embedding_fc.parameters(), "lr": HEAD_LR},
-                {"params": model.arcface.parameters(), "lr": HEAD_LR},
+                {"params": model.classifier.parameters(), "lr": HEAD_LR},
             ],
             weight_decay=WEIGHT_DECAY,
         )
@@ -310,7 +310,7 @@ def build_optimizer(model, stage: str, backbone_init: str = "random"):
                 {"params": model.backbone.parameters(), "lr": bb_lr},
                 {"params": model.head.parameters(), "lr": TRANSFORMER_LR},
                 {"params": model.embedding_fc.parameters(), "lr": HEAD_LR},
-                {"params": model.arcface.parameters(), "lr": HEAD_LR},
+                {"params": model.classifier.parameters(), "lr": HEAD_LR},
             ],
             weight_decay=WEIGHT_DECAY,
         )
@@ -416,8 +416,20 @@ def train(args=None):
     model = model.to(device, memory_format=torch.channels_last)
 
     amp_enabled = device.type == "cuda"
-    scaler = GradScaler("cuda", enabled=amp_enabled)
     criterion = nn.CrossEntropyLoss()
+
+    # GradScaler: conservative settings to prevent scale explosion on large datasets.
+    # Default growth_interval=2000 causes scale to double every ~0.6 epochs with frac=1.00
+    # (3241 batches/epoch), leading to fp16 overflow and training collapse at epoch 10-12.
+    num_train_batches = len(train_loader)
+    scaler = GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+        init_scale=2**10,          # 1024 instead of default 65536
+        growth_interval=num_train_batches,  # at most 1 scale doubling per epoch
+        growth_factor=1.5,         # grow by 1.5x instead of 2x — slower recovery, more stable
+        backoff_factor=0.5,
+    )
 
     best_acc = 0.0
     start_epoch = 0
@@ -440,8 +452,11 @@ def train(args=None):
             f"(epoch={ckpt_epoch}, stage={start_stage}, best_acc={best_acc:.4f})"
         )
         model.load_state_dict(resume["model_state"])
-        if "scaler_state" in resume:
+        # Only restore scaler state if resuming within the same stage.
+        # Cross-stage scaler restore can carry a bloated scale factor.
+        if "scaler_state" in resume and start_stage == resume.get("stage", "A"):
             scaler.load_state_dict(resume["scaler_state"])
+            print(f"[INFO] GradScaler state restored (scale={scaler.get_scale():.0f})")
     else:
         print("[INFO] No resume checkpoint found. Training from scratch.")
 
@@ -492,7 +507,7 @@ def train(args=None):
                 labels = labels.to(device, non_blocking=True)
                 optimizer.zero_grad(set_to_none=True)
                 with autocast(device_type=device.type, enabled=amp_enabled):
-                    logits = model(imgs, labels)
+                    logits = model(imgs)
                     loss = criterion(logits, labels)
 
                 loss_val = loss.item()
@@ -511,7 +526,8 @@ def train(args=None):
                 _, preds = logits.max(1)
                 total_correct += (preds == labels).sum().item()
                 total_samples += imgs.size(0)
-                pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples)
+                pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples,
+                                 scale=f"{scaler.get_scale():.0f}")
 
             train_acc = total_correct / total_samples if total_samples > 0 else 0
             train_loss = total_loss / total_samples if total_samples > 0 else 0
@@ -519,6 +535,7 @@ def train(args=None):
             is_best = val_acc > best_acc
             best_acc = max(best_acc, val_acc)
             res = print_resource_usage(f"A-E{epoch+1}")
+            print(f"[INFO] GradScaler scale after A-E{epoch+1}: {scaler.get_scale():.0f}")
             metrics_logger.log(epoch, stage="A", train_loss=train_loss, train_acc=train_acc,
                                val_acc=val_acc, best_acc=best_acc, lr=optimizer.param_groups[0]["lr"])
 
@@ -553,6 +570,19 @@ def train(args=None):
         seed=args.seed,
     )
     print("[INFO] Data loaders rebuilt for Stage B")
+
+    # Reset GradScaler for Stage B — Stage A may have accumulated a large scale factor
+    # that is inappropriate for Stage B's different gradient landscape (unfrozen backbone).
+    num_train_batches = len(train_loader)
+    scaler = GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+        init_scale=2**10,
+        growth_interval=num_train_batches,
+        growth_factor=1.5,
+        backoff_factor=0.5,
+    )
+    print(f"[INFO] GradScaler reset for Stage B (init_scale=1024, growth_interval={num_train_batches})")
 
     set_backbone_trainable(model, trainable=True)
     optimizer = build_optimizer(model, stage="B", backbone_init=args.backbone_init)
@@ -589,7 +619,7 @@ def train(args=None):
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with autocast(device_type=device.type, enabled=amp_enabled):
-                logits = model(imgs, labels)
+                logits = model(imgs)
                 loss = criterion(logits, labels)
 
             loss_val = loss.item()
@@ -608,7 +638,8 @@ def train(args=None):
             _, preds = logits.max(1)
             total_correct += (preds == labels).sum().item()
             total_samples += imgs.size(0)
-            pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples)
+            pbar.set_postfix(loss=loss_val, acc=total_correct / total_samples,
+                             scale=f"{scaler.get_scale():.0f}")
 
         scheduler.step()
 
@@ -618,6 +649,7 @@ def train(args=None):
         is_best = val_acc > best_acc
         best_acc = max(best_acc, val_acc)
         res = print_resource_usage(f"B-E{epoch+1}")
+        print(f"[INFO] GradScaler scale after B-E{epoch+1}: {scaler.get_scale():.0f}")
         metrics_logger.log(epoch, stage="B", train_loss=train_loss, train_acc=train_acc,
                            val_acc=val_acc, best_acc=best_acc, lr=optimizer.param_groups[0]["lr"])
 
@@ -665,9 +697,7 @@ def validate(model, loader, device, class_names=None, split_name: str = "val"):
     for imgs, labels in loader:
         imgs = imgs.to(device)
         labels = labels.to(device)
-        # Strict-protocol eval: label-free inference (no GT labels used inside the model)
-        emb = model(imgs, labels=None)
-        logits = model.arcface(emb, labels=None)
+        logits = model(imgs)
         _, preds = logits.max(1)
         total_correct += (preds == labels).sum().item()
         total_samples += imgs.size(0)

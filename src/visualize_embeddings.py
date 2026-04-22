@@ -44,7 +44,7 @@ class FixedClassImageFolder(DatasetFolder):
 
 @torch.no_grad()
 def extract_embeddings(model, loader, device, max_samples=5000):
-    """Extract embeddings (before ArcFace) from model."""
+    """Extract embeddings (before classifier) from model."""
     model.eval()
     embeddings = []
     labels = []
@@ -54,7 +54,7 @@ def extract_embeddings(model, loader, device, max_samples=5000):
         if count >= max_samples:
             break
         imgs = imgs.to(device)
-        emb = model(imgs, labels=None)  # (B, d_model)
+        emb = model(imgs, return_embedding=True)  # (B, d_model)
         embeddings.append(emb.cpu().numpy())
         labels.extend(lbls.numpy().tolist())
         count += imgs.size(0)

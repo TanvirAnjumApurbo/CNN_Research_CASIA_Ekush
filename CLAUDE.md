@@ -37,14 +37,11 @@ Both have `train/`, `val/`, `test/` subdirectories with numeric folder names.
 
 ## Architecture
 
-The model pipeline: `Input Image → ResNet50 Backbone (2048ch, 4×4) → TransformerHead (4 layers, d=512, CLS token) → Embedding FC (Linear + BatchNorm1d) → ArcFace (s=30, m=0.3) → logits`
+The model pipeline: `Input Image → ResNet50 Backbone (2048ch, 4×4) → TransformerHead (4 layers, d=512, CLS token) → Embedding FC (Linear + BatchNorm1d) → ReLU → Dropout(0.1) → Linear(512, 237) → logits`
 
-All defined in `src/model.py`. Key classes: `ResNet50Backbone`, `TransformerHead`, `ArcMarginProduct`, `HybridModel`.
+All defined in `src/model.py`. Key classes: `ResNet50Backbone`, `TransformerHead`, `HybridModel`.
 
-**AMP stability rules** — these layers MUST run in fp32 even under mixed precision:
-- `ArcMarginProduct.forward()` — cos/sin/sqrt operations overflow in fp16
-- `embedding_fc`'s `BatchNorm1d` — running statistics drift in fp16, causing NaN after ~8 epochs
-- Both use `torch.amp.autocast(device_type="cuda", enabled=False)` + `.float()` casts
+**AMP stability rule** — `embedding_fc`'s `BatchNorm1d` MUST run in fp32 even under mixed precision (running statistics drift in fp16, causing NaN after ~8 epochs). Uses `torch.amp.autocast(device_type="cuda", enabled=False)` + `.float()` cast.
 
 ## Training Pipeline
 
@@ -85,7 +82,7 @@ SSL backbone loading uses `extract_backbone_state()` which tries multiple key pr
 
 ## Key Patterns
 
-- **Validation protocol**: During eval, `model(imgs, labels=None)` returns embeddings, then `model.arcface(emb, labels=None)` returns cosine logits WITHOUT angular margin. This is strict inference mode.
+- **Validation protocol**: `model(imgs)` returns logits directly. For embedding extraction (t-SNE), use `model(imgs, return_embedding=True)`.
 - **Gradient clipping**: `scaler.unscale_(optimizer)` then `clip_grad_norm_(model.parameters(), max_norm=1.0)` before `scaler.step()`.
 - **Journal figures**: `plot_config.py` defines the color palette, `apply_journal_style()`, and `save_figure()` (outputs both PNG 300dpi + PDF). No titles on figures — captions go in LaTeX.
 - **Experiment naming**: `{backbone_init}_frac{fraction:.2f}` (e.g., `ssl_casia_frac0.10`)

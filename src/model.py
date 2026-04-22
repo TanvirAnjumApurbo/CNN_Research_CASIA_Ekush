@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -106,54 +105,6 @@ class TransformerHead(nn.Module):
         return cls
 
 
-class ArcMarginProduct(nn.Module):
-    """ArcFace (ArcMargin) layer producing logits.
-    Implementation adapted for stability.
-    """
-
-    def __init__(self, in_features, out_features, s=30.0, m=0.3, easy_margin=False):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
-        nn.init.xavier_uniform_(self.weight)
-        self.s = s
-        self.m = m
-        self.cos_m = math.cos(m)
-        self.sin_m = math.sin(m)
-        self.th = math.cos(math.pi - m)
-        self.mm = math.sin(math.pi - m) * m
-        self.easy_margin = easy_margin
-
-    def forward(self, input, labels=None):
-        """Compute ArcFace logits.
-
-        - Training (label-conditioned): pass `labels` to apply angular margin.
-        - Inference/validation (label-free): omit `labels` to get cosine logits.
-        """
-        # Force fp32: ArcFace cos/sin/sqrt are numerically unstable in fp16
-        with torch.amp.autocast(device_type="cuda", enabled=False):
-            input = input.float()
-            cosine = F.linear(F.normalize(input), F.normalize(self.weight.float()))
-
-            if labels is None:
-                return cosine * self.s
-
-            sine = torch.sqrt(torch.clamp(1.0 - torch.clamp(cosine, -1.0 + 1e-7, 1.0 - 1e-7) ** 2, min=1e-6))
-            phi = cosine * self.cos_m - sine * self.sin_m
-            if self.easy_margin:
-                phi = torch.where(cosine > 0, phi, cosine)
-            else:
-                phi = torch.where(cosine > self.th, phi, cosine - self.mm)
-
-            one_hot = torch.zeros_like(cosine)
-            one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-
-            logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
-            logits *= self.s
-            return logits
-
-
 class HybridModel(nn.Module):
     def __init__(
         self,
@@ -165,10 +116,7 @@ class HybridModel(nn.Module):
         input_size=128,
     ):
         super().__init__()
-        if backbone is None:
-            self.backbone = ResNetBackbone()
-        else:
-            self.backbone = backbone
+        self.backbone = backbone if backbone is not None else ResNetBackbone()
         self.head = TransformerHead(
             in_channels=backbone_channels,
             d_model=d_model,
@@ -178,9 +126,13 @@ class HybridModel(nn.Module):
         self.embedding_fc = nn.Sequential(
             nn.Linear(d_model, d_model), nn.BatchNorm1d(d_model)
         )
-        self.arcface = ArcMarginProduct(d_model, num_classes, s=30.0, m=0.3)
+        self.classifier = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(d_model, num_classes),
+        )
 
-    def forward(self, x, labels=None):
+    def forward(self, x, return_embedding=False):
         featmap = self.backbone(x)
         emb = self.head(featmap)
         # Linear in current precision, BatchNorm in fp32 to prevent
@@ -188,7 +140,7 @@ class HybridModel(nn.Module):
         emb = self.embedding_fc[0](emb)
         with torch.amp.autocast(device_type="cuda", enabled=False):
             emb = self.embedding_fc[1](emb.float())
-        if labels is None:
+        if return_embedding:
             return emb
-        logits = self.arcface(emb, labels)
+        logits = self.classifier(emb)
         return logits
