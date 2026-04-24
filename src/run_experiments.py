@@ -149,18 +149,24 @@ def phase_finetune(args):
             exp_name = f"{exp['name']}_frac{frac:.2f}"
             exp_dir = EXPERIMENT_DIR / exp_name
 
-            # Skip only if training fully completed (check epoch in checkpoint)
+            # Skip only if training fully completed.
             resume_ckpt = exp_dir / "resume_checkpoint.pth"
             if resume_ckpt.exists() and not args.force:
                 import torch
                 ckpt = torch.load(resume_ckpt, map_location="cpu", weights_only=False)
-                ckpt_epoch = ckpt.get("epoch", -1)
-                total_epochs = 100  # STAGE_A (6) + STAGE_B (94)
-                if ckpt_epoch >= total_epochs - 1:
-                    print(f"[SKIP] {exp_name} already completed (epoch {ckpt_epoch+1}/{total_epochs})")
+                if bool(ckpt.get("training_complete", False)):
+                    print(f"[SKIP] {exp_name} already completed (training_complete=true)")
                     continue
                 else:
-                    print(f"[RESUME] {exp_name} from epoch {ckpt_epoch+1}/{total_epochs}")
+                    if "stage_a_steps_done" in ckpt and "stage_b_steps_done" in ckpt:
+                        print(
+                            f"[RESUME] {exp_name} "
+                            f"(A_steps={ckpt.get('stage_a_steps_done', 0)}, "
+                            f"B_steps={ckpt.get('stage_b_steps_done', 0)})"
+                        )
+                    else:
+                        ckpt_epoch = ckpt.get("epoch", -1)
+                        print(f"[RESUME] {exp_name} from legacy checkpoint epoch {ckpt_epoch+1}")
 
             cmd = [
                 sys.executable, str(SRC_DIR / "train_hybrid_small.py"),
@@ -172,6 +178,15 @@ def phase_finetune(args):
                 "--batch_size", "128",
                 "--eval_batch_size", "128",
             ]
+
+            if args.step_budget_mode is not None:
+                cmd.extend(["--step_budget_mode", args.step_budget_mode])
+            if args.max_steps is not None:
+                cmd.extend(["--max_steps", str(args.max_steps)])
+            if args.step_budget_reference_fraction is not None:
+                cmd.extend(["--step_budget_reference_fraction", str(args.step_budget_reference_fraction)])
+            if args.stage_b_precision is not None:
+                cmd.extend(["--stage_b_precision", args.stage_b_precision])
 
             if exp["ssl_checkpoint"]:
                 cmd.extend(["--ssl_checkpoint", exp["ssl_checkpoint"]])
@@ -272,6 +287,14 @@ def parse_args():
                         help="Force re-run even if checkpoints exist")
     parser.add_argument("--label_fractions", type=float, nargs="+", default=None,
                         help="Custom label fractions (default: 0.01 0.05 0.10 0.25 0.50 1.0)")
+    parser.add_argument("--step_budget_mode", type=str, default=None, choices=["fixed", "epoch"],
+                        help="Forwarded to train_hybrid_small.py")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Forwarded to train_hybrid_small.py")
+    parser.add_argument("--step_budget_reference_fraction", type=float, default=None,
+                        help="Forwarded to train_hybrid_small.py")
+    parser.add_argument("--stage_b_precision", type=str, default=None, choices=["auto", "fp16", "bf16", "fp32"],
+                        help="Forwarded to train_hybrid_small.py")
 
     # For --phase single
     parser.add_argument("--backbone_init", type=str, default="random")
@@ -306,6 +329,14 @@ def main():
             "--experiment_name", exp_name,
             "--batch_size", "128",
         ]
+        if args.step_budget_mode is not None:
+            cmd.extend(["--step_budget_mode", args.step_budget_mode])
+        if args.max_steps is not None:
+            cmd.extend(["--max_steps", str(args.max_steps)])
+        if args.step_budget_reference_fraction is not None:
+            cmd.extend(["--step_budget_reference_fraction", str(args.step_budget_reference_fraction)])
+        if args.stage_b_precision is not None:
+            cmd.extend(["--stage_b_precision", args.stage_b_precision])
         if args.ssl_checkpoint:
             cmd.extend(["--ssl_checkpoint", args.ssl_checkpoint])
         run_cmd(cmd, f"Single experiment: {exp_name}")
